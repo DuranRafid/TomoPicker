@@ -668,7 +668,7 @@ def make_train_dataloader(args, samples_stats):
         batch_sampler = CustomBatchSampler(num_samples=len(dataset), num_batches=args.num_iterations, batch_size=args.train_batch_size)
         dataloader = DataLoader(dataset=dataset, batch_sampler=batch_sampler)
     else:
-        dataloader = DataLoader(dataset=dataset, batch_size=args.train_batch_size, shuffle=True, drop_last=True)
+        dataloader = DataLoader(dataset=dataset, batch_size=args.train_batch_size, shuffle=True)
 
     return dataloader
 
