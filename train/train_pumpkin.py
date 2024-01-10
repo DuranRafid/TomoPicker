@@ -27,7 +27,7 @@ from tqdm import tqdm
 import argparse
 
 # Method Architecture Implementation
-class PumpkinEncoder(nn.Module):
+class BasicEncoder(nn.Module):
     def __init__(self, subtomogram_size):
         super().__init__()
         self.encoder, self.latent_dim = self.__get_encoder(subtomogram_size)
@@ -38,22 +38,21 @@ class PumpkinEncoder(nn.Module):
         layers = []
 
         if subtomogram_size == 16:
-            kernel_dims = [4, 3, 3, 3]
+            kernel_dims = [8, 5]
         elif subtomogram_size == 32:
-            kernel_dims = [8, 4, 4, 4, 4]
+            kernel_dims = [8, 5, 5]
 
-        layers += [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dims[0], stride=2, bias=False)]
-        layers += [nn.BatchNorm3d(num_features=out_channels)]
-        layers += [nn.PReLU()]
-
-        for kernel_dim in kernel_dims[1:]:
-            in_channels = out_channels
-            out_channels = out_channels * channel_scaling
-
-            layers += [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dim, bias=False)]
+        for kernel_dim in kernel_dims[:-1]:
+            layers += [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dim, stride=2, bias=False)]
             layers += [nn.BatchNorm3d(num_features=out_channels)]
             layers += [nn.PReLU()]
 
+            in_channels = out_channels
+            out_channels = out_channels * channel_scaling
+
+        layers += [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dims[-1], bias=False)]
+        layers += [nn.BatchNorm3d(num_features=out_channels)]
+        layers += [nn.PReLU()]
         return nn.Sequential(*layers), out_channels
 
     def forward(self, x):
@@ -63,7 +62,7 @@ class GaussianDropout(nn.Module):
     def __init__(self, dropout):
         super().__init__()
 
-        assert 0 <= dropout < 1, "Invalid dropout provided!"
+        assert 0 <= dropout < 1
 
         self.dropout = dropout
         self.std = math.sqrt(dropout / (1 - dropout))
@@ -83,13 +82,11 @@ class YOPOEncoder(nn.Module):
         kernel_dim, self.latent_dim = None, None
 
         if subtomogram_size == 16:
-            kernel_dim, self.latent_dim = 2, 256
+            kernel_dim, self.latent_dim = 2, 64
         elif subtomogram_size == 32:
-            kernel_dim, self.latent_dim = 3, 512
+            kernel_dim, self.latent_dim = 4, 128
 
-        self.convolution_units = nn.ModuleList()
-        self.global_maxpool_units = nn.ModuleList()
-
+        self.convolution_units, self.global_maxpool_units = nn.ModuleList(), nn.ModuleList()
         sum_out_channels, in_channels, out_channels, channel_increment = 0, 1, 64, 16
 
         for _ in range(10):
@@ -101,25 +98,12 @@ class YOPOEncoder(nn.Module):
             out_channels = out_channels + channel_increment
 
         self.batch_norm_unit = nn.BatchNorm3d(num_features=sum_out_channels, eps=0.001, momentum=0.99)
-        self.downsample_unit = self.__get_downsample_unit(in_channels=sum_out_channels, downsample_dim=self.latent_dim)
+        self.conv3d_unit = nn.Conv3d(in_channels=sum_out_channels, out_channels=self.latent_dim, kernel_size=1)
 
     def __get_convolution_unit(self, in_channels, out_channels, kernel_size):
         layers = [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size)]
         layers += [nn.ELU()]
         layers += [nn.BatchNorm3d(num_features=out_channels, eps=0.001, momentum=0.99)]
-        return nn.Sequential(*layers)
-
-    def __get_downsample_unit(self, in_channels, downsample_dim):
-        out_channels, channel_scaling = 1024, 2
-        layers = []
-
-        while not in_channels == downsample_dim:
-            layers += [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=1)]
-            layers += [nn.ELU()]
-
-            in_channels = out_channels
-            out_channels = out_channels // channel_scaling
-
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -133,43 +117,39 @@ class YOPOEncoder(nn.Module):
 
         global_maxpool = torch.cat(tensors=global_maxpools, dim=1)
         batch_norm = self.batch_norm_unit(global_maxpool)
-        return self.downsample_unit(batch_norm)
+        return self.conv3d_unit(batch_norm)
 
-class PumpkinDecoder(nn.Module):
+class BasicDecoder(nn.Module):
     def __init__(self, subtomogram_size, latent_dim, add_bias=True):
         super().__init__()
         self.decoder = self.__get_decoder(subtomogram_size, latent_dim, add_bias)
 
     def __get_decoder(self, subtomogram_size, latent_dim, add_bias):
-        kernel_dims = [2, 2, 2]
+        kernel_dims = None
         in_channels, out_channels, channel_scaling = latent_dim, latent_dim, 2
         layers = []
 
-        for kernel_dim in kernel_dims:
-            layers += [nn.ConvTranspose3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dim, bias=add_bias)]
-            layers += [nn.BatchNorm3d(num_features=out_channels)]
-            layers += [nn.LeakyReLU()]
+        if subtomogram_size == 16:
+            kernel_dims = [4, 4, 4]
+        elif subtomogram_size == 32:
+            kernel_dims = [4, 4, 4, 4]
 
+        layers += [nn.ConvTranspose3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dims[0], bias=add_bias)]
+        layers += [nn.BatchNorm3d(num_features=out_channels)]
+        layers += [nn.LeakyReLU()]
+
+        for kernel_dim in kernel_dims[1:-1]:
             in_channels = out_channels
             out_channels = out_channels // channel_scaling
 
-        if subtomogram_size == 16:
-            kernel_dims = [4, 4]
-        elif subtomogram_size == 32:
-            kernel_dims = [4, 4, 4]
-
-        for kernel_dim in kernel_dims[:-1]:
             layers += [nn.ConvTranspose3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dim, stride=2, padding=1, bias=add_bias)]
             layers += [nn.BatchNorm3d(num_features=out_channels)]
             layers += [nn.LeakyReLU()]
-
-            in_channels = out_channels
-            out_channels = out_channels // channel_scaling
         else:
+            in_channels = out_channels
             out_channels = 1
 
         layers += [nn.ConvTranspose3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_dims[-1], stride=2, padding=1, bias=add_bias)]
-
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -179,13 +159,13 @@ class Pumpkin(nn.Module):
     def __init__(self, encoder_mode, subtomogram_size, use_decoder):
         super().__init__()
 
-        if encoder_mode == "pumpkin":
-            self.sample_encoder = PumpkinEncoder(subtomogram_size)
+        if encoder_mode == "basic":
+            self.sample_encoder = BasicEncoder(subtomogram_size)
         elif encoder_mode == "yopo":
             self.sample_encoder = YOPOEncoder(subtomogram_size)
 
-        self.sample_decoder = PumpkinDecoder(subtomogram_size, self.sample_encoder.latent_dim, add_bias=False) if use_decoder else None
-        self.sample_classifier = PumpkinDecoder(subtomogram_size, self.sample_encoder.latent_dim)
+        self.sample_decoder = BasicDecoder(subtomogram_size, self.sample_encoder.latent_dim, add_bias=False) if use_decoder else None
+        self.sample_classifier = BasicDecoder(subtomogram_size, self.sample_encoder.latent_dim)
 
     def forward(self, x):
         # Features extraction from subtomogram samples using encoder
@@ -206,13 +186,13 @@ class Objective(ABC):
         self.recon_weight = reconstruction_weight
         self.l2_coefficient = l2_coefficient
         self.stats_headers = ["Loss", "Recon Error", "Precision", "TPR", "FPR"]
-    
+
     def compute_score(self, features):
         features = torch.unsqueeze(features, dim=1)
         extracted_features = self.model.sample_encoder(features)
         score = self.model.sample_classifier(extracted_features).view(-1)
         return score
-    
+
     def compute_recon_loss(self, features):
         features = torch.unsqueeze(features, dim=1)
         extracted_features = self.model.sample_encoder(features)
@@ -220,20 +200,20 @@ class Objective(ABC):
         recon_loss = (features - recon_features) ** 2
         recon_loss = torch.mean(torch.sum(recon_loss.view(recon_loss.size(0), -1), dim=1))
         return recon_loss
-    
+
     def compute_performance_metrics(self, score, labels):
         p_hat = torch.sigmoid(score)
         precision = torch.sum(p_hat[labels == 1]).item() / torch.sum(p_hat).item()
         tpr = torch.mean(p_hat[labels == 1]).item()
         fpr = torch.mean(p_hat[labels == 0]).item()
         return precision, tpr, fpr
-    
+
     def compute_regularization_loss(self):
         regularization_loss = sum([torch.sum((weights ** 2)) for weights in self.model.sample_encoder.parameters()])
         regularization_loss += sum([torch.sum((weights ** 2)) for weights in self.model.sample_classifier.parameters()])
         regularization_loss = 0.5 * self.l2_coefficient * regularization_loss
         return regularization_loss
-    
+
     @abstractmethod
     def step(self, features, labels):
         pass
@@ -278,7 +258,7 @@ class PU(Objective):
     def __init__(self, model, criteria, optimizer, pi, reconstruction_weight, l2_coefficient):
         super().__init__(model, criteria, optimizer, pi, reconstruction_weight, l2_coefficient)
         self.beta = 0
-    
+
     def step(self, features, labels):
         score = self.compute_score(features)
         labels = labels.view(-1)
@@ -293,7 +273,7 @@ class PU(Objective):
         loss_pn = self.criteria(score[labels == 1], 0 * labels[labels == 1].float())
         loss_un = self.criteria(score[labels == 0], labels[labels == 0].float())
         loss_u = loss_un - loss_pn * self.pi
-        
+
         if loss_u.item() < -self.beta:
             loss = -loss_u
             backprop_loss = loss
@@ -302,20 +282,20 @@ class PU(Objective):
         else:
             loss = loss_pp * self.pi + loss_u
             backprop_loss = loss
-        
+
         if self.recon_weight > 0:
             backprop_loss = backprop_loss + recon_loss * self.recon_weight
-        
+
         backprop_loss.backward()
-        
+
         precision, tpr, fpr = self.compute_performance_metrics(score, labels)
-        
+
         if self.l2_coefficient > 0:
             regularization_loss = self.compute_regularization_loss()
             regularization_loss.backward()
-        
+
         self.optimizer.step()
-        
+
         return loss.item(), recon_loss.item() if self.recon_weight > 0 else None, precision, tpr, fpr
 
 class GE_KL(Objective):
@@ -326,7 +306,7 @@ class GE_KL(Objective):
         self.stats_headers += ["GE Penalty"]
         self.momentum = 1
         self.entropy_penalty = 0
-    
+
     def step(self, features, labels):
         score = self.compute_score(features)
         labels = labels.view(-1)
@@ -334,35 +314,35 @@ class GE_KL(Objective):
 
         if self.recon_weight > 0:
             recon_loss = self.compute_recon_loss(features)
-        
+
         self.optimizer.zero_grad()
-        
+
         classifier_loss = self.criteria(score[labels == 1], labels[labels == 1].float())
         p_hat = torch.mean(torch.sigmoid(score[labels == 0]))
-        
+
         if self.momentum < 1:
             p_hat = p_hat * self.momentum + self.running_expectation * (1 - self.momentum)
             self.running_expectation = p_hat.item()
-        
+
         entropy = np.log(self.pi) * self.pi + np.log1p(-self.pi) * (1 - self.pi)
         ge_penalty = -torch.log(p_hat) * self.pi - torch.log1p(-p_hat) * (1 - self.pi) + entropy
         ge_penalty = ge_penalty * self.slack / self.momentum
-        
+
         loss = classifier_loss + ge_penalty
-        
+
         if self.recon_weight > 0:
             loss = loss + recon_loss * self.recon_weight
-        
+
         loss.backward()
-        
+
         precision, tpr, fpr = self.compute_performance_metrics(score, labels)
-        
+
         if self.l2_coefficient > 0:
             regularization_loss = self.compute_regularization_loss()
             regularization_loss.backward()
-        
+
         self.optimizer.step()
-        
+
         return classifier_loss.item(), recon_loss.item() if self.recon_weight > 0 else None, precision, tpr, fpr, ge_penalty.item()
 
 class GE_Binomial(Objective):
@@ -372,53 +352,53 @@ class GE_Binomial(Objective):
         self.stats_headers += ["GE Penalty"]
         self.entropy_penalty = 0
         self.posterior_l1 = 0
-    
+
     def step(self, features, labels):
         score = self.compute_score(features)
         labels = labels.view(-1)
         recon_loss = None
-        
+
         if self.recon_weight > 0:
             recon_loss = self.compute_recon_loss(features)
-        
+
         self.optimizer.zero_grad()
-        
+
         classifier_loss = self.criteria(score[labels == 1], labels[labels == 1].float())
-        
+
         select = (labels.data == 0)
         N = torch.sum(select).item()
         p_hat = torch.sigmoid(score[select])
         q_mu = torch.sum(p_hat)
         q_var = torch.sum((p_hat * (1 - p_hat)))
-        
+
         count_vector = torch.arange(start=0, end=(N + 1)).float()
         count_vector = count_vector.to(q_mu.device)
-        
+
         q_discrete = -0.5 * (q_mu - count_vector) ** 2 / (q_var + sys.float_info.epsilon)
         q_discrete = F.softmax(q_discrete, dim=0)
-        
+
         log_binom = S.binom.logpmf(k=np.arange(start=0, stop=(N + 1)), n=N, p=self.pi)
         log_binom = torch.from_numpy(log_binom).float()
-        
+
         if q_var.is_cuda:
             log_binom = log_binom.cuda()
-        
+
         ge_penalty = -torch.sum(log_binom * q_discrete)
         loss = classifier_loss + ge_penalty * self.slack
-        
+
         if self.recon_weight > 0:
             loss = loss + recon_loss * self.recon_weight
-        
+
         loss.backward()
-        
+
         precision, tpr, fpr = self.compute_performance_metrics(score, labels)
-        
+
         if self.l2_coefficient > 0:
             regularization_loss = self.compute_regularization_loss()
             regularization_loss.backward()
-        
+
         self.optimizer.step()
-        
+
         return classifier_loss.item(), recon_loss.item() if self.recon_weight > 0 else None, precision, tpr, fpr, ge_penalty.item()
 
 # Utilities Implementation
@@ -460,133 +440,154 @@ def make_particles_mask(mask_shape, coords, particle_radius):
 
     return np.clip(particles_mask, a_min=0, a_max=1)
 
-def make_data(args):
-    tomogram_names, tomogram_paths = [], []
-
+def make_data(args, add_noise=False):
+    tomogram_names, tomogram_paths, test_tomograms = [], [], []
+    
     for tomogram_file_name in os.listdir(args.tomograms_dir):
-        tomogram_name, extension = os.path.splitext(tomogram_file_name)
+        tomogram_name, _ = os.path.splitext(tomogram_file_name)
         tomogram_names.append(tomogram_name)
         tomogram_paths.append(args.tomograms_dir + os.sep + tomogram_file_name)
-
+    
     tomograms = pd.DataFrame({"tomogram_name": tomogram_names, "tomogram_path": tomogram_paths})
+    
+    if args.num_test_tomograms > 0.25 * len(tomogram_names):
+        args.num_test_tomograms = 1
+    
+    test_tomograms = random.sample(tomogram_names, k=args.num_test_tomograms)
     coordinates = pd.read_csv(args.coordinates_path)
-
+    
     if os.path.exists(args.data_dir):
         shutil.rmtree(args.data_dir)
-
-    subtomogram_names, total_regions, total_positive_regions = [], [], []
-
+    
+    train_subtomograms_dir, train_submasks_dir = args.data_dir + os.sep + "Train" + os.sep + "Subtomograms", args.data_dir + os.sep + "Train" + os.sep + "Labels"
+    test_subtomograms_dir, test_submasks_dir = args.data_dir + os.sep + "Test" + os.sep + "Subtomograms", args.data_dir + os.sep + "Test" + os.sep + "Labels"
+    
+    os.makedirs(train_subtomograms_dir)
+    os.makedirs(train_submasks_dir)
+    os.makedirs(test_subtomograms_dir)
+    os.makedirs(test_submasks_dir)
+    
+    train_subtomogram_names, test_subtomogram_names, train_positive_fractions, test_positive_fractions = [], [], [], []
+    
     for tomogram_name, tomogram_path in zip(tomograms.tomogram_name, tomograms.tomogram_path):
-        # Loading tomogram from tomogram directory and preprocessing tomogram for downstream usage
         tomogram = load_tomogram(tomogram_path=tomogram_path)
-        tomogram_shape = tomogram.shape
+        
+        z_dim, y_dim, x_dim = math.ceil(tomogram.shape[0] / args.subtomogram_size), math.ceil(tomogram.shape[1] / args.subtomogram_size), math.ceil(tomogram.shape[2] / args.subtomogram_size)
+        tomogram_shape = (z_dim * args.subtomogram_size, y_dim * args.subtomogram_size, x_dim * args.subtomogram_size)
 
-        # Selecting particles belonging to loaded tomogram
-        coords = coordinates.loc[coordinates["tomogram_name"] == tomogram_name]
-
-        # Filtering out particles located outside loaded tomogram
-        z_min = y_min = x_min = args.subtomogram_size // 2
-        z_max, y_max, x_max = [dim_shape - args.subtomogram_size // 2 for dim_shape in tomogram_shape]
-        coords = coords[(z_min < coords.z_coord) & (coords.z_coord < z_max) & (y_min < coords.y_coord) & (coords.y_coord < y_max) & (x_min < coords.x_coord) & (coords.x_coord < x_max)]
-
-        assert len(coords) > 0, f"No particles remaining for {tomogram_name}!"
-
-        # Preparing particle and random coordinates before subtomograms and submasks generation
-        particle_coords = coords[["z_coord", "y_coord", "x_coord"]].to_numpy(dtype=np.int32)
-        random_coords = np.array([[random.randint(z_min, z_max), random.randint(y_min, y_max), random.randint(x_min, x_max)] for _ in range(int(args.random_subdata_percentage * particle_coords.shape[0]))], dtype=np.int32)
-        coords = np.concatenate((particle_coords, random_coords), axis=0)
-
-        # Generating subtomograms having particles located roughly at the centre
-        subtomograms_path = args.data_dir + os.sep + "Subtomograms"
-
-        if not os.path.exists(subtomograms_path):
-            os.makedirs(subtomograms_path)
-
-        for index in range(coords.shape[0]):
-            subtomogram = tomogram[coords[index, 0] - args.subtomogram_size // 2:coords[index, 0] + args.subtomogram_size // 2, coords[index, 1] - args.subtomogram_size // 2:coords[index, 1] + args.subtomogram_size // 2, coords[index, 2] - args.subtomogram_size // 2:coords[index, 2] + args.subtomogram_size // 2]
-
-            subtomogram_name = tomogram_name + "-subtomo-" + str(index)
-            subtomogram_names.append(subtomogram_name)
-
-            with open(f"{subtomograms_path}{os.sep}{subtomogram_name}.npy", 'wb') as npy_file:
-                np.save(file=npy_file, arr=subtomogram)
+        padded_tomogram = np.zeros(shape=tomogram_shape, dtype=np.float32)
+        padded_tomogram[:tomogram.shape[0], :tomogram.shape[1], :tomogram.shape[2]] = tomogram
 
         del tomogram
         gc.collect()
 
-        # Generating particles mask of loaded tomogram as labels for downstream analyses
-        particles_mask = make_particles_mask(mask_shape=tomogram_shape, coords=particle_coords, particle_radius=args.particle_radius)
+        tomogram = padded_tomogram
+        coords = coordinates.loc[coordinates["tomogram_name"] == tomogram_name]
 
-        # Generating submasks having particles located roughly at the centre
-        labels_path = args.data_dir + os.sep + "Labels"
+        if tomogram_name not in test_tomograms:
+            coords = coords.sample(n=int(args.particles_fraction * len(coords)), replace=False)
 
-        if not os.path.exists(labels_path):
-            os.makedirs(labels_path)
+        coords = coords[(0 < coords.z_coord) & (coords.z_coord < tomogram_shape[0]) & (0 < coords.y_coord) & (coords.y_coord < tomogram_shape[1]) & (0 < coords.x_coord) & (coords.x_coord < tomogram_shape[2])]
 
-        for index in range(coords.shape[0]):
-            submask = particles_mask[coords[index, 0] - args.subtomogram_size // 2:coords[index, 0] + args.subtomogram_size // 2, coords[index, 1] - args.subtomogram_size // 2:coords[index, 1] + args.subtomogram_size // 2, coords[index, 2] - args.subtomogram_size // 2:coords[index, 2] + args.subtomogram_size // 2]
+        assert len(coords) > 0
 
-            submask_name = tomogram_name + "-labels-" + str(index)
-            total_regions.append(submask.size)
-            total_positive_regions.append(np.sum(submask))
+        coords = coords[["z_coord", "y_coord", "x_coord"]].to_numpy(dtype=np.int32)
 
-            if np.sum(submask) == 0:
-                submask = np.zeros(shape=submask.shape, dtype=np.uint8)
-                submask[np.random.choice(submask.shape[0]), np.random.choice(submask.shape[1]), np.random.choice(submask.shape[2])] = 1
+        for k in range(z_dim):
+            for j in range(y_dim):
+                for i in range(x_dim):
+                    subtomogram = tomogram[k * args.subtomogram_size:(k + 1) * args.subtomogram_size, j * args.subtomogram_size:(j + 1) * args.subtomogram_size, i * args.subtomogram_size:(i + 1) * args.subtomogram_size]
+                    subtomogram_name = f"{tomogram_name}-subtomo-{k}_{j}_{i}"
 
-            with open(f"{labels_path}{os.sep}{submask_name}.npy", 'wb') as npy_file:
-                np.save(file=npy_file, arr=submask)
+                    if tomogram_name in test_tomograms:
+                        test_subtomogram_names.append(subtomogram_name)
+
+                        with open(f"{test_subtomograms_dir}{os.sep}{subtomogram_name}.npy", 'wb') as npy_file:
+                            np.save(file=npy_file, arr=subtomogram)
+                    else:
+                        train_subtomogram_names.append(subtomogram_name)
+
+                        with open(f"{train_subtomograms_dir}{os.sep}{subtomogram_name}.npy", 'wb') as npy_file:
+                            np.save(file=npy_file, arr=subtomogram)
+
+        del tomogram
+        gc.collect()
+
+        particles_mask = make_particles_mask(mask_shape=tomogram_shape, coords=coords, particle_radius=args.particle_radius)
+
+        for k in range(z_dim):
+            for j in range(y_dim):
+                for i in range(x_dim):
+                    submask = particles_mask[k * args.subtomogram_size:(k + 1) * args.subtomogram_size, j * args.subtomogram_size:(j + 1) * args.subtomogram_size, i * args.subtomogram_size:(i + 1) * args.subtomogram_size]
+                    submask_name = f"{tomogram_name}-labels-{k}_{j}_{i}"
+
+                    if tomogram_name in test_tomograms:
+                        test_positive_fractions.append(np.sum(submask) / submask.size)
+
+                        with open(f"{test_submasks_dir}{os.sep}{submask_name}.npy", 'wb') as npy_file:
+                            np.save(file=npy_file, arr=submask)
+                    else:
+                        train_positive_fractions.append(np.sum(submask) / submask.size)
+
+                        if add_noise and np.sum(submask) == 0:
+                            submask = np.zeros(shape=submask.shape, dtype=np.uint8)
+                            submask[np.random.choice(submask.shape[0]), np.random.choice(submask.shape[1]), np.random.choice(submask.shape[2])] = 1
+
+                        with open(f"{train_submasks_dir}{os.sep}{submask_name}.npy", 'wb') as npy_file:
+                            np.save(file=npy_file, arr=submask)
 
         del particles_mask
         gc.collect()
 
-    subtomogram_sizes, particle_radii = [args.subtomogram_size] * len(subtomogram_names), [args.particle_radius] * len(subtomogram_names)
-    subtomograms_stats = pd.DataFrame({"subtomogram_name": subtomogram_names, "subtomogram_size": subtomogram_sizes, "particle_radius": particle_radii, "total_regions": total_regions, "total_positive_regions": total_positive_regions, "p_observed": [tpr / tr for tpr, tr in zip(total_positive_regions, total_regions)]})
-    subtomograms_stats.to_csv(args.data_dir + os.sep + "subtomograms_stats.csv", index=False)
+    train_subtomogram_stats = pd.DataFrame({"subtomogram_name": train_subtomogram_names, "subtomogram_size": [args.subtomogram_size] * len(train_subtomogram_names), "particle_radius": [args.particle_radius] * len(train_subtomogram_names), "positive_fraction": train_positive_fractions})
+    test_subtomogram_stats = pd.DataFrame({"subtomogram_name": test_subtomogram_names, "subtomogram_size": [args.subtomogram_size] * len(test_subtomogram_names), "particle_radius": [args.particle_radius] * len(test_subtomogram_names), "positive_fraction": test_positive_fractions})
 
-    return subtomograms_stats
+    train_subtomogram_stats.to_csv(args.data_dir + os.sep + "Train" + os.sep + "train_subtomogram_stats.csv", index=False)
+    test_subtomogram_stats.to_csv(args.data_dir + os.sep + "Test" + os.sep + "test_subtomogram_stats.csv", index=False)
+
+    return train_subtomogram_stats, test_subtomogram_stats
 
 def load_data(args):
-    # Loading stats on subtomograms & labels and preparing subtomograms_stats for downstream usage
-    subtomograms_stats = pd.read_csv(args.data_dir + os.sep + "subtomograms_stats.csv")
-    subtomograms_stats = subtomograms_stats[["subtomogram_name", "total_regions", "total_positive_regions"]].values.tolist()
-    subtomograms_stats = [[s_s[0].split('-')[0], s_s[0].split('-')[2], s_s[2], s_s[1] - s_s[2], "labeled"] for s_s in subtomograms_stats]
+    train_sample_stats = pd.read_csv(args.data_dir + os.sep + "Train" + os.sep + "train_subtomogram_stats.csv")
+    train_sample_stats = train_sample_stats[["subtomogram_name", "positive_fraction"]].values.tolist()
+    train_sample_stats = [[s_s[0].split('-')[0], s_s[0].split('-')[2], float(s_s[1])] for s_s in train_sample_stats]
 
-    # Shuffling subtomograms_stats for samples randomization and splitting it into training and testing subsets
-    random.shuffle(subtomograms_stats)
-    train_test_split_index = int(args.train_test_split_ratio * len(subtomograms_stats))
-    train_samples_stats, test_samples_stats = subtomograms_stats[:train_test_split_index], subtomograms_stats[train_test_split_index:]
+    test_sample_stats = pd.read_csv(args.data_dir + os.sep + "Test" + os.sep + "test_subtomogram_stats.csv")
+    test_sample_stats = test_sample_stats[["subtomogram_name", "positive_fraction"]].values.tolist()
+    test_sample_stats = [[s_s[0].split('-')[0], s_s[0].split('-')[2], float(s_s[1])] for s_s in test_sample_stats]
 
-    # Shuffling train_samples_stats for samples randomization and splitting it into labeled and unlabeled subsets
-    random.shuffle(train_samples_stats)
-    labeled_unlabeled_split_index = int(args.particles_fraction * len(train_samples_stats))
-    labeled_train_samples_stats = train_samples_stats[:labeled_unlabeled_split_index]
-    unlabeled_train_samples_stats = train_samples_stats[labeled_unlabeled_split_index:]
+    random.shuffle(train_sample_stats)
+    random.shuffle(test_sample_stats)
 
-    # Postprocessing unlabeled_train_samples_stats and determining class prior or fractions of positive regions in unlabeled samples
-    unlabeled_train_samples_stats = [[s_s[0], s_s[1], s_s[2], s_s[3], "unlabeled"] for s_s in unlabeled_train_samples_stats]
+    train_tomogram_names = [s_s[0] for s_s in train_sample_stats]
+    train_tomogram_names = set(train_tomogram_names)
+    num_train_tomograms = len(train_tomogram_names)
 
-    if args.particles_fraction == 1:
-        args.objective_type = "PN" if args.objective_type in ["GE-KL", "GE-binomial"] else args.objective_type
+    num_total_particles = args.num_expected_particles * num_train_tomograms
+    grid_line = np.linspace(start=-args.particle_radius, stop=args.particle_radius, num=2 * args.particle_radius + 1)
 
-    pi = None
+    z_grid = np.zeros(shape=(2 * args.particle_radius + 1, 2 * args.particle_radius + 1, 2 * args.particle_radius + 1)) + grid_line[:, np.newaxis, np.newaxis]
+    y_grid = np.zeros(shape=(2 * args.particle_radius + 1, 2 * args.particle_radius + 1, 2 * args.particle_radius + 1)) + grid_line[np.newaxis, :, np.newaxis]
+    x_grid = np.zeros(shape=(2 * args.particle_radius + 1, 2 * args.particle_radius + 1, 2 * args.particle_radius + 1)) + grid_line[np.newaxis, np.newaxis, :]
 
-    if args.objective_type in ["PN", "PU"]:
-        total_positive_regions = sum([s_s[2] for s_s in labeled_train_samples_stats]) + sum([s_s[2] for s_s in unlabeled_train_samples_stats])
-        total_negative_regions = sum([s_s[3] for s_s in labeled_train_samples_stats]) + sum([s_s[3] for s_s in unlabeled_train_samples_stats])
-        positive_class_prior = total_positive_regions / (total_positive_regions + total_negative_regions)
-        pi = positive_class_prior
+    grid_space = z_grid ** 2 + y_grid ** 2 + x_grid ** 2
+    grid_mask = (grid_space <= args.particle_radius ** 2).astype(np.uint8)
+
+    positive_cells_per_particle = np.sum(grid_mask)
+    total_positive_cells = num_total_particles * positive_cells_per_particle
+
+    expected_pi = total_positive_cells / (args.subtomogram_size ** 3 * len(train_sample_stats))
+    observed_pi = np.mean([s_s[2] for s_s in train_sample_stats])
+
+    pi = expected_pi
+
+    if expected_pi <= observed_pi:
+        args.objective_type = "PN"
+        pi = observed_pi
     elif args.objective_type in ["GE-KL", "GE-binomial"]:
-        total_unlabeled_positive_regions = sum([s_s[2] for s_s in unlabeled_train_samples_stats])
-        total_negative_regions = sum([s_s[3] for s_s in labeled_train_samples_stats]) + sum([s_s[3] for s_s in unlabeled_train_samples_stats])
-        positive_class_prior_in_unlabeled = total_unlabeled_positive_regions / (total_unlabeled_positive_regions + total_negative_regions)
-        pi = positive_class_prior_in_unlabeled
+        pi = expected_pi - observed_pi
 
-    # Merging labeled_train_samples_stats and unlabeled_train_samples_stats into train_samples_stats
-    train_samples_stats = labeled_train_samples_stats + unlabeled_train_samples_stats
-    random.shuffle(train_samples_stats)
-
-    return train_samples_stats, test_samples_stats, pi
+    return train_sample_stats, test_sample_stats, num_train_tomograms, pi
 
 def make_objective(args, model, pi):
     criteria = nn.BCEWithLogitsLoss()
@@ -607,14 +608,14 @@ def make_objective(args, model, pi):
     return objective, criteria, lr_scheduler
 
 class CustomSampleDataset(Dataset):
-    def __init__(self, samples_stats, data_dir, augment_data):
+    def __init__(self, args, samples_stats, is_train=True):
         self.features, self.labels = [], []
 
         for sample_stats in samples_stats:
             self.features.append(sample_stats[0] + "-subtomo-" + sample_stats[1])
-            self.labels.append([sample_stats[0] + "-labels-" + sample_stats[1], sample_stats[4]])
+            self.labels.append(sample_stats[0] + "-labels-" + sample_stats[1])
 
-        self.data_dir, self.augment_data = data_dir, augment_data
+        self.data_dir, self.augment_data = args.data_dir + os.sep + ("Train" if is_train else "Test"), args.augment_data
 
     def __len__(self):
         return len(self.features)
@@ -623,14 +624,8 @@ class CustomSampleDataset(Dataset):
         with open(f"{self.data_dir}{os.sep}Subtomograms{os.sep}{self.features[idx]}.npy", 'rb') as npy_file:
             subtomogram = np.load(file=npy_file)
 
-        if self.labels[idx][1] == "labeled":
-            with open(f"{self.data_dir}{os.sep}Labels{os.sep}{self.labels[idx][0]}.npy", 'rb') as npy_file:
-                submask = np.load(file=npy_file)
-        elif self.labels[idx][1] == "unlabeled":
-            submask = np.zeros(shape=subtomogram.shape, dtype=np.uint8)
-            submask[np.random.choice(submask.shape[0]), np.random.choice(submask.shape[1]), np.random.choice(submask.shape[2])] = 1
-        else:
-            submask = None
+        with open(f"{self.data_dir}{os.sep}Labels{os.sep}{self.labels[idx]}.npy", 'rb') as npy_file:
+            submask = np.load(file=npy_file)
 
         if self.augment_data:
             choice_value = np.random.uniform()
@@ -662,18 +657,18 @@ class CustomBatchSampler(BatchSampler):
             yield random.sample(self.sample_indices, k=self.batch_size)
 
 def make_train_dataloader(args, samples_stats):
-    dataset = CustomSampleDataset(samples_stats=samples_stats, data_dir=args.data_dir, augment_data=args.augment_data)
+    dataset = CustomSampleDataset(args=args, samples_stats=samples_stats)
 
     if args.augment_data:
         batch_sampler = CustomBatchSampler(num_samples=len(dataset), num_batches=args.num_iterations, batch_size=args.train_batch_size)
         dataloader = DataLoader(dataset=dataset, batch_sampler=batch_sampler)
     else:
-        dataloader = DataLoader(dataset=dataset, batch_size=args.train_batch_size, shuffle=True)
+        dataloader = DataLoader(dataset=dataset, batch_size=args.train_batch_size, shuffle=True, drop_last=True)
 
     return dataloader
 
 def make_test_dataloader(args, samples_stats):
-    dataset = CustomSampleDataset(samples_stats=samples_stats, data_dir=args.data_dir, augment_data=False)
+    dataset = CustomSampleDataset(args=args, samples_stats=samples_stats, is_train=False)
     dataloader = DataLoader(dataset=dataset, batch_size=args.test_batch_size)
     return dataloader
 
@@ -727,7 +722,7 @@ def test_model(model, criteria, test_dataloader):
 
 def train_test_model(args, model, objective, criteria, lr_scheduler, train_dataloader, test_dataloader):
     stats_headers, args_dict = '\t'.join(["Epoch", "Iteration", "Split"] + objective.stats_headers + ["AUPRC", "MCC"]), vars(args)
-    stats = "-- Pumpkin Training & Testing --\n\n" + '\n'.join([f"{key}: {args_dict[key]}" for key in args_dict]) + '\n'
+    logs = "-- Pumpkin Training & Testing --\n\n" + '\n'.join([f"{key}: {args_dict[key]}" for key in args_dict]) + '\n'
 
     max_test_auprc = -np.inf
 
@@ -735,38 +730,38 @@ def train_test_model(args, model, objective, criteria, lr_scheduler, train_datal
         if not model.training:
             model.train()
 
-        stats += '\n' + stats_headers
+        logs += '\n' + stats_headers
 
-        stats = fit_epoch(epoch=epoch, objective=objective, train_dataloader=train_dataloader, output=stats)
+        logs = fit_epoch(epoch=epoch, objective=objective, train_dataloader=train_dataloader, output=logs)
         loss, precision, tpr, fpr, auprc, mcc = test_model(model=model, criteria=criteria, test_dataloader=test_dataloader)
 
         test_stats = '\t'.join([str(epoch + 1), '-', "test", f"{loss:.5f}", '-', f"{precision:.5f}", f"{tpr:.5f}", f"{fpr:.5f}"] + (['-'] if args.objective_type in ["GE-KL", "GE-binomial"] else []) + [f"{auprc:.5f}", f"{mcc:.5f}"])
-        stats += "\n\n" + stats_headers + '\n' + test_stats + '\n'
+        logs += "\n\n" + stats_headers + '\n' + test_stats + '\n'
 
         if max_test_auprc < auprc:
-            stats += f"\nTest AUPRC score improved from {max_test_auprc:.5f} to {auprc:.5f}.\n"
+            logs += f"\nTest AUPRC score improved from {max_test_auprc:.5f} to {auprc:.5f}.\n"
             max_test_auprc = auprc
 
             if not os.path.exists(args.model_path):
                 os.makedirs(args.model_path)
 
             torch.save(obj=model.state_dict(), f=f"{args.model_path}{os.sep}{args.model_name}.pt")
-            stats += f"Updated model {args.model_name}.pt saved.\n"
+            logs += f"Updated model {args.model_name}.pt saved.\n"
         else:
-            stats += f"\nTest AUPRC score did not improve from {max_test_auprc:.5f}.\n"
+            logs += f"\nTest AUPRC score did not improve from {max_test_auprc:.5f}.\n"
 
         lr_scheduler.step(max_test_auprc)
-        stats += f"Current learning rate is {lr_scheduler._last_lr[0]}.\n"
+        logs += f"Current learning rate is {lr_scheduler._last_lr[0]}.\n"
 
-    stats += "\nDone!"
+    logs += "\nDone!"
 
-    if not os.path.exists(args.stats_path):
-        os.makedirs(args.stats_path)
+    if not os.path.exists(args.logs_path):
+        os.makedirs(args.logs_path)
 
-    with open(args.stats_path + os.sep + args.model_name + "_train_test_stats.txt", 'w') as stats_file:
-        stats_file.write(stats)
+    with open(args.logs_path + os.sep + args.model_name + "_train_test_logs.txt", 'w') as logs_file:
+        logs_file.write(logs)
 
-    return stats
+    return logs
 
 def get_args():
     parser = argparse.ArgumentParser(description="Python script for training a Pumpkin model to pick macromolecules from cryo-electron tomograms.")
@@ -776,17 +771,19 @@ def get_args():
     parser.add_argument("--tomogram", default=None, type=str, metavar=metavar, help="Path to a folder containing sample tomograms for data generation (Default: None)", dest="tomograms_dir")
     parser.add_argument("--coord", default=None, type=str, metavar=metavar, help="Path to the particle coordinates file for data generation (Default: None)", dest="coordinates_path")
 
-    parser.add_argument("--encoder", default="pumpkin", type=str, metavar=metavar, help="Type of feature extractor (either pumpkin or yopo) to use in network (Default: pumpkin)", dest="encoder_mode")
+    parser.add_argument("--encoder", default="basic", type=str, metavar=metavar, help="Type of feature extractor (either basic or yopo) to use in network (Default: basic)", dest="encoder_mode")
     parser.add_argument("--decoder", action="store_true", help="Whether to use sample reconstructor in network (Default: False)", dest="use_decoder")
 
     parser.add_argument("--size", default=16, type=int, metavar=metavar, help="Size of subtomograms and submasks (either 16 or 32) in each dimension (Default: 16)", dest="subtomogram_size")
     parser.add_argument("--radius", default=7, type=int, metavar=metavar, help="Radius of a particle (in pixel) in sample tomograms (Default: 7)", dest="particle_radius")
-    parser.add_argument("--random", default=0.25, type=float, metavar=metavar, help="Percentage of randomly generated subtomograms and submasks (Default: 0.25)", dest="random_subdata_percentage")
+    # parser.add_argument("--random", default=0.25, type=float, metavar=metavar, help="Percentage of randomly generated subtomograms and submasks (Default: 0.25)", dest="random_subdata_percentage")
 
-    parser.add_argument("--split", default=0.8, type=float, metavar=metavar, help="Percentage of samples used in training (Default: 0.8)", dest="train_test_split_ratio")
-    parser.add_argument("--fraction", default=0.1, type=float, metavar=metavar, help="Percentage of samples with proper labeling for training (Default: 0.1)", dest="particles_fraction")
+    parser.add_argument("--split", default=1, type=int, metavar=metavar, help="Number of tomograms to randomly pick for testing (Default: 1)", dest="num_test_tomograms")
+    parser.add_argument("--fraction", default=1.0, type=float, metavar=metavar, help="Percentage of samples with proper labeling for training (Default: 1.0)", dest="particles_fraction")
+    parser.add_argument("--expect", default=1000, type=int, metavar=metavar, help="Expected average number of particles in each tomogram (Default: 1000)", dest="num_expected_particles")
 
     parser.add_argument("--epoch", default=10, type=int, metavar=metavar, help="Number of training epochs (Default: 10)", dest="num_epochs")
+    # We may no longer need --iter
     parser.add_argument("--iter", default=100, type=int, metavar=metavar, help="Number of weight updates in each training epoch (Default: 100)", dest="num_iterations")
     parser.add_argument("--train_batch", default=256, type=int, metavar=metavar, help="Number of samples in a training batch (Default: 256)", dest="train_batch_size")
     parser.add_argument("--test_batch", default=1, type=int, metavar=metavar, help="Number of samples in a testing batch (Default: 1)", dest="test_batch_size")
@@ -798,25 +795,31 @@ def get_args():
 
     parser.add_argument("--name", default="pumpkin", type=str, metavar=metavar, help="Name of the model (Default: pumpkin)", dest="model_name")
     parser.add_argument("--save_weight", default=None, type=str, metavar=metavar, help="Path to a folder for saving model weights (Default: None)", dest="model_path")
-    parser.add_argument("--save_stat", default=None, type=str, metavar=metavar, help="Path to a folder for saving training and testing stats (Default: None)", dest="stats_path")
+    parser.add_argument("--save_log", default=None, type=str, metavar=metavar, help="Path to a folder for saving training and testing logs (Default: None)", dest="logs_path")
 
     parser.add_argument("--recon_weight", default=0.0, type=float, metavar=metavar, help="Weight on sample reconstruction error in loss calculation (Default: 0.0)", dest="reconstruction_weight")
     parser.add_argument("--l2_coeff", default=0.0, type=float, metavar=metavar, help="Weight on L2 regularization term (Default: 0.0)", dest="l2_coefficient")
 
+    # We may need to omit GE-binomial for this work
     parser.add_argument("--objective", default="PU", type=str, metavar=metavar, help="Type of objective (any one of PN, PU, GE-KL or GE-binomial) to use in training (Default: PU)", dest="objective_type")
+    # We may need to omit GE-binomial for this work
     parser.add_argument("--slack", default=None, type=float, metavar=metavar, help="Value of slack to use in GE-KL or GE-binomial objective (Default: None)", dest="slack")
 
     parser.add_argument("--make", action="store_true", help="Whether to generate input dataset before training (Default: False)", dest="make_dataset")
+    # We may no longer need --augment
     parser.add_argument("--augment", action="store_true", help="Whether to augment input dataset during training (Default: False)", dest="augment_data")
 
     parser.set_defaults(use_decoder=False)
     parser.set_defaults(make_dataset=False)
+    # We may no longer need --augment
     parser.set_defaults(augment_data=False)
 
     args = parser.parse_args()
 
-    encoder_modes = ["pumpkin", "yopo"]
+    encoder_modes = ["basic", "yopo"]
+    # We may need to omit GE-binomial for this work
     objective_types = ["PN", "PU", "GE-KL", "GE-binomial"]
+    # We may need to omit GE-binomial for this work
     slack_configs = {"GE-KL": 10, "GE-binomial": 1}
 
     assert args.encoder_mode in encoder_modes, "Invalid encoder_mode provided!"
@@ -824,10 +827,11 @@ def get_args():
 
     assert args.subtomogram_size == 16 or args.subtomogram_size == 32, "Invalid subtomogram_size provided!"
     assert args.particle_radius > 0, "Invalid particle_radius provided!"
-    assert args.random_subdata_percentage >= 0, "Invalid random_subdata_percentage provided!"
+    # assert args.random_subdata_percentage >= 0, "Invalid random_subdata_percentage provided!"
 
-    assert 0 < args.train_test_split_ratio < 1, "Invalid train_test_split_ratio provided!"
+    assert args.num_test_tomograms > 0, "Invalid num_test_tomograms provided!"
     assert 0 < args.particles_fraction <= 1, "Invalid particles_fraction provided!"
+    assert args.num_expected_particles > 0, "Invalid num_expected_particles provided!"
 
     assert args.reconstruction_weight >= 0, "Invalid reconstruction_weight provided!"
     assert args.l2_coefficient >= 0, "Invalid l2_coefficient provided!"
@@ -840,27 +844,27 @@ def get_args():
 if __name__ == "__main__":
     # Processing command line arguments
     args = get_args()
-
+    
     # Producing sample subtomograms and submasks (if necessary)
     if args.make_dataset:
         make_data(args=args)
-
+    
     # Making an instance of Pumpkin class for training and testing
     pumpkin = make_model(args=args)
-
+    
     if torch.cuda.is_available():
         pumpkin = pumpkin.cuda()
-
+    
     # Loading samples_stats and fraction of positive regions in unlabeled samples (pi)
-    train_samples_stats, test_samples_stats, pi = load_data(args=args)
-    print(f"\n#Train Samples = {len(train_samples_stats)}, #Test Samples = {len(test_samples_stats)}, Pi = {pi}\n")
-
+    train_samples_stats, test_samples_stats, num_train_tomograms, pi = load_data(args=args)
+    print(f"\n#Train Samples = {len(train_samples_stats)}, #Test Samples = {len(test_samples_stats)}, #Train Tomograms = {num_train_tomograms}, Pi = {pi}\n")
+    
     # Making objective function for training pipeline
     objective, criteria, lr_scheduler = make_objective(args=args, model=pumpkin, pi=pi)
-
+    
     # Making training and testing dataloaders for training pipeline
     train_dataloader = make_train_dataloader(args=args, samples_stats=train_samples_stats)
     test_dataloader = make_test_dataloader(args=args, samples_stats=test_samples_stats)
-
+    
     # Training and testing a model for picking particles from tomograms
     train_test_model(args=args, model=pumpkin, objective=objective, criteria=criteria, lr_scheduler=lr_scheduler, train_dataloader=train_dataloader, test_dataloader=test_dataloader)
