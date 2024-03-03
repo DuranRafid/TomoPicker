@@ -88,27 +88,43 @@ def generate_estimations_nms3D(tomogram_name, score_matrix, particle_radius, num
     )
     return estimations, estimations_df
 
-def generate_estimations_local_maxima(tomogram_name, score_matrix, particle_radius, keep_zero_threshold=False):
+def generate_estimations_local_maxima(tomogram_name, score_matrix, particle_radius, num_pick_particles=1000, use_default_neighborhood=False, keep_zero_threshold=True):
     # Reference: https://stackoverflow.com/questions/3684484/peak-detection-in-a-2d-array/3689710#3689710
     # Reference: https://github.com/xulabs/aitom/blob/master/aitom/filter/local_extrema.py
-    neighborhood = generate_binary_structure(rank=len(score_matrix.shape), connectivity=2)
+    if use_default_neighborhood:
+        neighborhood = generate_binary_structure(rank=len(score_matrix.shape), connectivity=2)
+    else:
+        submask_width, threshold = 2 * particle_radius + 1, particle_radius ** 2
+        grid_line = np.linspace(start=-particle_radius, stop=particle_radius, num=submask_width)
+        z_grid = np.zeros(shape=(submask_width, submask_width, submask_width)) + grid_line[:, np.newaxis, np.newaxis]
+        y_grid = np.zeros(shape=(submask_width, submask_width, submask_width)) + grid_line[np.newaxis, :, np.newaxis]
+        x_grid = np.zeros(shape=(submask_width, submask_width, submask_width)) + grid_line[np.newaxis, np.newaxis, :]
+        grid_space = z_grid ** 2 + y_grid ** 2 + x_grid ** 2
+        neighborhood = grid_space <= threshold
+
     local_max = maximum_filter(input=score_matrix, footprint=neighborhood) == score_matrix
     background = (score_matrix < 0) if keep_zero_threshold else (score_matrix == np.min(score_matrix))
     eroded_background = binary_erosion(input=background, structure=neighborhood, border_value=1)
-    detected_maxima = np.bitwise_and(local_max, np.bitwise_not(eroded_background))
-    detected_maxima, estimations = np.where(detected_maxima), []
+    detected_maxima = np.where(np.bitwise_and(local_max, np.bitwise_not(eroded_background)))
 
     assert len(detected_maxima) == len(score_matrix.shape) and len(detected_maxima[0]) == len(detected_maxima[1]) == len(detected_maxima[2])
 
-    for index in range(len(detected_maxima[0])):
-        estimations.append([detected_maxima[2][index], detected_maxima[1][index], detected_maxima[0][index]])
+    num_init_picked_particles, estimations = len(detected_maxima[0]), []
 
+    for index in range(num_init_picked_particles):
+        x_coord, y_coord, z_coord = detected_maxima[2][index], detected_maxima[1][index], detected_maxima[0][index]
+        estimations.append([x_coord, y_coord, z_coord, score_matrix[z_coord, y_coord, x_coord]])
+
+    estimations.sort(key=lambda estimation: estimation[3], reverse=True)
+    estimations = estimations[:num_pick_particles]
+    
     estimations_df = pd.DataFrame(
         {
             "tomogram_name": [tomogram_name] * len(estimations),
             "x_coord": [item[0] for item in estimations],
             "y_coord": [item[1] for item in estimations],
-            "z_coord": [item[2] for item in estimations]
+            "z_coord": [item[2] for item in estimations],
+            "score": [item[3] for item in estimations]
         }
     )
     return estimations, estimations_df
@@ -194,7 +210,8 @@ if __name__ == "__main__":
         estimations, estimations_df = generate_estimations_local_maxima(
             tomogram_name=args.tomogram_name,
             score_matrix=prediction_scores_matrix,
-            particle_radius=args.particle_radius
+            particle_radius=args.particle_radius,
+            num_pick_particles=args.num_pick_particles
         )
         print(f"Number of Picked Particles (Local Maxima): {len(estimations)}")
 
