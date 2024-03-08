@@ -117,7 +117,7 @@ def generate_estimations_local_maxima(tomogram_name, score_matrix, particle_radi
 
     estimations.sort(key=lambda estimation: estimation[3], reverse=True)
     estimations = estimations[:num_pick_particles]
-    
+
     estimations_df = pd.DataFrame(
         {
             "tomogram_name": [tomogram_name] * len(estimations),
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     gc.collect()
 
     # Merging prediction scores for subtomograms to get global prediction scores for query tomogram
-    prediction_scores_matrix = np.squeeze(a=prediction_scores.cpu().numpy(), axis=1)
+    prediction_scores_matrix = np.squeeze(a=prediction_scores.detach().cpu().numpy(), axis=1)
     prediction_scores_matrix = merge_score_matrix(score_matrix=prediction_scores_matrix, starting_coords=starting_coords, subtomogram_size=args.subtomogram_size, tomogram_shape=tomogram_shape)
 
     del prediction_scores, starting_coords
