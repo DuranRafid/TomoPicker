@@ -1,4 +1,5 @@
 # Pumpkin: PU learning-based Macromolecule PicKINg in cryo-electron tomograms
+# This script is originally written by Md. Zarif Ul Alam, later heavily modified by Ajmain Yasar Ahmed
 
 # Import Statements
 import torch
@@ -775,7 +776,7 @@ def get_args():
     parser.add_argument("--decoder", action="store_true", help="Whether to use sample reconstructor in network (Default: False)", dest="use_decoder")
 
     parser.add_argument("--size", default=16, type=int, metavar=metavar, help="Size of subtomograms and submasks (either 16 or 32) in each dimension (Default: 16)", dest="subtomogram_size")
-    parser.add_argument("--radius", default=7, type=int, metavar=metavar, help="Radius of a particle (in pixel) in sample tomograms (Default: 7)", dest="particle_radius")
+    parser.add_argument("--radius", default=7, type=int, metavar=metavar, help="Radius of a particle (in voxel) in sample tomograms (Default: 7)", dest="particle_radius")
     # parser.add_argument("--random", default=0.25, type=float, metavar=metavar, help="Percentage of randomly generated subtomograms and submasks (Default: 0.25)", dest="random_subdata_percentage")
 
     parser.add_argument("--split", default=1, type=int, metavar=metavar, help="Number of tomograms to randomly pick for testing (Default: 1)", dest="num_test_tomograms")
