@@ -1,4 +1,5 @@
 # Pumpkin: PU learning-based Macromolecule PicKINg in cryo-electron tomograms
+# This script is originally written by Md. Zarif Ul Alam, later heavily modified by Ajmain Yasar Ahmed
 
 # Import Statements
 import torch
@@ -155,26 +156,123 @@ class BasicDecoder(nn.Module):
     def forward(self, x):
         return self.decoder(x)
 
+class UNetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.convolution_unit1 = self.__get_convolution_unit(in_channels=in_channels, out_channels=out_channels)
+        self.convolution_unit2 = self.__get_convolution_unit(in_channels=out_channels, out_channels=out_channels)
+
+    def __get_convolution_unit(self, in_channels, out_channels):
+        layers = [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1)]
+        layers += [nn.BatchNorm3d(num_features=out_channels)]
+        layers += [nn.ReLU()]
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        y = self.convolution_unit1(x)
+        return self.convolution_unit2(y)
+
+class ResUNetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.convolution_unit1 = self.__get_convolution_unit(in_channels=in_channels, out_channels=out_channels)
+        self.convolution_unit2 = self.__get_convolution_unit(in_channels=out_channels, out_channels=out_channels)
+        self.conv3d_layer = nn.Conv3d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.batch_norm3d_layer = nn.BatchNorm3d(num_features=out_channels)
+        self.relu_layer = nn.ReLU()
+
+    def __get_convolution_unit(self, in_channels, out_channels):
+        layers = [nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1)]
+        layers += [nn.BatchNorm3d(num_features=out_channels)]
+        layers += [nn.ReLU()]
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        y = self.convolution_unit1(x)
+        x = self.convolution_unit2(y)
+        x = self.conv3d_layer(x)
+        x = self.batch_norm3d_layer(x)
+        return self.relu_layer(x + y)
+
+class UNetCoder(nn.Module):
+    def __init__(self, subtomogram_size, use_resunet=True, use_dropout=False):
+        super().__init__()
+        self.maxpool3d_layer, self.dropout_layer = nn.MaxPool3d(kernel_size=2, stride=2), nn.Dropout() if use_dropout else None
+        self.down_unet_block1 = ResUNetBlock(in_channels=1, out_channels=32) if use_resunet else UNetBlock(in_channels=1, out_channels=32)
+        self.down_unet_block2 = ResUNetBlock(in_channels=32, out_channels=64) if use_resunet else UNetBlock(in_channels=32, out_channels=64)
+        self.down_unet_block3 = ResUNetBlock(in_channels=64, out_channels=128) if use_resunet else UNetBlock(in_channels=64, out_channels=128)
+        self.down_unet_block4, self.deconvolution_unit3, self.up_unet_block3 = None, None, None
+
+        if subtomogram_size == 32:
+            self.down_unet_block4 = ResUNetBlock(in_channels=128, out_channels=256) if use_resunet else UNetBlock(in_channels=128, out_channels=256)
+            self.deconvolution_unit3 = self.__get_deconvolution_unit(in_channels=256, out_channels=128)
+            self.up_unet_block3 = ResUNetBlock(in_channels=256, out_channels=128) if use_resunet else UNetBlock(in_channels=256, out_channels=128)
+
+        self.deconvolution_unit2 = self.__get_deconvolution_unit(in_channels=128, out_channels=64)
+        self.up_unet_block2 = ResUNetBlock(in_channels=128, out_channels=64) if use_resunet else UNetBlock(in_channels=128, out_channels=64)
+        self.deconvolution_unit1 = self.__get_deconvolution_unit(in_channels=64, out_channels=32)
+        self.up_unet_block1 = ResUNetBlock(in_channels=64, out_channels=32) if use_resunet else UNetBlock(in_channels=64, out_channels=32)
+        self.conv3d_layer = nn.Conv3d(in_channels=32, out_channels=1, kernel_size=1)
+
+    def __get_deconvolution_unit(self, in_channels, out_channels):
+        layers = [nn.ConvTranspose3d(in_channels=in_channels, out_channels=out_channels, kernel_size=4, stride=2, padding=1)]
+        layers += [nn.BatchNorm3d(num_features=out_channels)]
+        layers += [nn.ReLU()]
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        down_unet_block_output1 = self.down_unet_block1(x)
+        down_unet_maxpool_output1 = self.maxpool3d_layer(down_unet_block_output1)
+        down_unet_block_output2 = self.down_unet_block2(down_unet_maxpool_output1)
+        down_unet_maxpool_output2 = self.maxpool3d_layer(down_unet_block_output2)
+        down_unet_block_output3 = self.down_unet_block3(down_unet_maxpool_output2)
+
+        if self.down_unet_block4 is None:
+            down_unet_output = self.dropout_layer(down_unet_block_output3) if self.dropout_layer is not None else down_unet_block_output3
+        else:
+            down_unet_maxpool_output3 = self.maxpool3d_layer(down_unet_block_output3)
+            down_unet_block_output4 = self.down_unet_block4(down_unet_maxpool_output3)
+            down_unet_output = self.dropout_layer(down_unet_block_output4) if self.dropout_layer is not None else down_unet_block_output4
+            up_unet_deconvolution_output3 = self.deconvolution_unit3(down_unet_output)
+            up_unet_concat_output3 = torch.cat(tensors=(down_unet_block_output3, up_unet_deconvolution_output3), dim=1)
+            down_unet_output = self.up_unet_block3(up_unet_concat_output3)
+
+        up_unet_deconvolution_output2 = self.deconvolution_unit2(down_unet_output)
+        up_unet_concat_output2 = torch.cat(tensors=(down_unet_block_output2, up_unet_deconvolution_output2), dim=1)
+        up_unet_block_output2 = self.up_unet_block2(up_unet_concat_output2)
+        up_unet_deconvolution_output1 = self.deconvolution_unit1(up_unet_block_output2)
+        up_unet_concat_output1 = torch.cat(tensors=(down_unet_block_output1, up_unet_deconvolution_output1), dim=1)
+        up_unet_block_output1 = self.up_unet_block1(up_unet_concat_output1)
+        return self.conv3d_layer(up_unet_block_output1)
+
 class Pumpkin(nn.Module):
     def __init__(self, encoder_mode, subtomogram_size, use_decoder):
         super().__init__()
 
-        if encoder_mode == "basic":
-            self.sample_encoder = BasicEncoder(subtomogram_size)
-        elif encoder_mode == "yopo":
-            self.sample_encoder = YOPOEncoder(subtomogram_size)
+        if encoder_mode == "unet":
+            self.sample_coder = UNetCoder(subtomogram_size=subtomogram_size)
+        else:
+            self.sample_coder = None
 
-        self.sample_decoder = BasicDecoder(subtomogram_size, self.sample_encoder.latent_dim, add_bias=False) if use_decoder else None
-        self.sample_classifier = BasicDecoder(subtomogram_size, self.sample_encoder.latent_dim)
+            if encoder_mode == "basic":
+                self.sample_encoder = BasicEncoder(subtomogram_size)
+            elif encoder_mode == "yopo":
+                self.sample_encoder = YOPOEncoder(subtomogram_size)
+
+            self.sample_decoder = BasicDecoder(subtomogram_size, self.sample_encoder.latent_dim, add_bias=False) if use_decoder else None
+            self.sample_classifier = BasicDecoder(subtomogram_size, self.sample_encoder.latent_dim)
 
     def forward(self, x):
-        # Features extraction from subtomogram samples using encoder
-        z = self.sample_encoder(x)
-        # Sample reconstruction from extracted features using decoder
-        y = self.sample_decoder(z) if self.sample_decoder is not None else None
-        # Sample classification with extracted features using classifier
-        x = self.sample_classifier(z)
-        return x, y
+        if self.sample_coder is not None:
+            return self.sample_coder(x), None
+        else:
+            # Features extraction from subtomogram samples using encoder
+            z = self.sample_encoder(x)
+            # Sample reconstruction from extracted features using decoder
+            y = self.sample_decoder(z) if self.sample_decoder is not None else None
+            # Sample classification with extracted features using classifier
+            x = self.sample_classifier(z)
+            return x, y
 
 # Training Objectives Implementation
 class Objective(ABC):
@@ -771,11 +869,12 @@ def get_args():
     parser.add_argument("--tomogram", default=None, type=str, metavar=metavar, help="Path to a folder containing sample tomograms for data generation (Default: None)", dest="tomograms_dir")
     parser.add_argument("--coord", default=None, type=str, metavar=metavar, help="Path to the particle coordinates file for data generation (Default: None)", dest="coordinates_path")
 
+    # We should make necessary changes to description of --encoder
     parser.add_argument("--encoder", default="basic", type=str, metavar=metavar, help="Type of feature extractor (either basic or yopo) to use in network (Default: basic)", dest="encoder_mode")
     parser.add_argument("--decoder", action="store_true", help="Whether to use sample reconstructor in network (Default: False)", dest="use_decoder")
 
     parser.add_argument("--size", default=16, type=int, metavar=metavar, help="Size of subtomograms and submasks (either 16 or 32) in each dimension (Default: 16)", dest="subtomogram_size")
-    parser.add_argument("--radius", default=7, type=int, metavar=metavar, help="Radius of a particle (in pixel) in sample tomograms (Default: 7)", dest="particle_radius")
+    parser.add_argument("--radius", default=7, type=int, metavar=metavar, help="Radius of a particle (in voxel) in sample tomograms (Default: 7)", dest="particle_radius")
     # parser.add_argument("--random", default=0.25, type=float, metavar=metavar, help="Percentage of randomly generated subtomograms and submasks (Default: 0.25)", dest="random_subdata_percentage")
 
     parser.add_argument("--split", default=1, type=int, metavar=metavar, help="Number of tomograms to randomly pick for testing (Default: 1)", dest="num_test_tomograms")
@@ -816,7 +915,7 @@ def get_args():
 
     args = parser.parse_args()
 
-    encoder_modes = ["basic", "yopo"]
+    encoder_modes = ["basic", "yopo", "unet"]
     # We may need to omit GE-binomial for this work
     objective_types = ["PN", "PU", "GE-KL", "GE-binomial"]
     # We may need to omit GE-binomial for this work
