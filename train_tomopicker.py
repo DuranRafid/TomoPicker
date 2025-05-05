@@ -288,6 +288,7 @@ class PN(Objective):
 
         if self.pi is not None:
             factor = 10*torch.sum(labels[labels == 1].float())/labels.size(0)
+            # factor=1
             positive_loss = factor*self.criteria(score[labels == 1], labels[labels == 1].float())
             negative_loss = self.criteria(score[labels == 0], labels[labels == 0].float())
             if not math.isnan(positive_loss):
@@ -327,7 +328,9 @@ class PU(Objective):
 
         self.optimizer.zero_grad()
 
-        factor = 10*torch.sum(labels[labels == 1].float())/labels.size(0)
+        # factor = 10*torch.sum(labels[labels == 1].float())/labels.size(0)
+        # factor = 100*torch.sum(labels[labels == 1].float())/labels.size(0)
+        factor = 1*torch.sum(labels[labels == 1].float())/labels.size(0)
         loss_pp = factor*self.criteria(score[labels == 1], labels[labels == 1].float())
         loss_pn = factor*self.criteria(score[labels == 1], 0 * labels[labels == 1].float())
         loss_un = self.criteria(score[labels == 0], labels[labels == 0].float())
@@ -385,7 +388,8 @@ class GE_KL(Objective):
 
         self.optimizer.zero_grad()
 
-        factor = 10*torch.sum(labels[labels == 1].float())/labels.size(0)
+        # factor = 10*torch.sum(labels[labels == 1].float())/labels.size(0)
+        factor = 100*torch.sum(labels[labels == 1].float())/labels.size(0)
         classifier_loss = factor*self.criteria(score[labels == 1], labels[labels == 1].float())
 
         p_hat = torch.mean(torch.sigmoid(score[labels == 0]))
@@ -502,11 +506,14 @@ def make_data(args, add_noise=False):
         gc.collect()
 
         tomogram = padded_tomogram
-        coords = coordinates.loc[coordinates["tomogram_name"] == int(tomogram_name.split('_')[0])]
+        # coords = coordinates.loc[coordinates["tomogram_name"] == int(tomogram_name.split('_')[0])]
+        # Modified line (extract the numeric part after the underscore)
+        coords = coordinates.loc[coordinates["tomogram_name"] == int(tomogram_name.split('_')[1])]
 
         if tomogram_name not in test_tomograms:
             coords = coords.sample(n=int(args.particles_fraction * len(coords)), replace=False)
-        print(int(tomogram_name.split('_')[0]), len(coords))
+        # print(int(tomogram_name.split('_')[0]), len(coords))
+        print(int(tomogram_name.split('_')[1]), len(coords))
         coords = coords[(0 < coords.z_coord) & (coords.z_coord < tomogram_shape[0]) & (0 < coords.y_coord) & (coords.y_coord < tomogram_shape[1]) & (0 < coords.x_coord) & (coords.x_coord < tomogram_shape[2])]
 
         assert len(coords) > 0
@@ -725,8 +732,10 @@ class CustomSampleDataset(Dataset):
             self.features.append(sample_stats[0] + "-subtomo-" + sample_stats[1])
             self.labels.append(sample_stats[0] + "-labels-" + sample_stats[1])
 
-        self.data_dir, self.augment_data = args.data_dir + os.sep + ("Train" if is_train else "Test"), args.augment_data
+        # self.data_dir, self.augment_data = args.data_dir + os.sep + ("Train" if is_train else "Test"), args.augment_data
+        self.data_dir = args.data_dir + os.sep + ("Train" if is_train else "Test")
 
+        self.augment_data = getattr(args, 'augment_data', False)  # Default to False if not present
     def __len__(self):
         return len(self.features)
 
@@ -809,11 +818,10 @@ def get_args():
     parser.add_argument("--slack", default=None, type=float, metavar=metavar, help="Value of slack to use in GE-KL objective (Default: None)", dest="slack")
 
     parser.add_argument("--make", action="store_true", help="Whether to generate input dataset before training (Default: False)", dest="make_dataset")
-    # We may no longer need --augment
    
     parser.set_defaults(use_decoder=False)
     parser.set_defaults(make_dataset=False)
-    # We may no longer need --augment
+    parser.set_defaults(augment_data=False) 
    
     args = parser.parse_args()
 
