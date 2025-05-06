@@ -73,7 +73,7 @@ python inference_tomopicker.py \
   --size 24
 ```
 
-This command performs inference using a UNet-based model trained with the GE-KL objective. It will pick up particles from the tomogram `TS_0003.mrc` located in the `Data/` folder using the model `pombe_vpp_ribosome_unet_GE_KL.pt` stored in the `Model/` directory.You can download the tomogram from the given drive link in the `Data/` folder.
+This command performs inference using a UNet-based model trained with the GE-KL objective. It will pick up particles from the tomogram `TS_0003.mrc` located in the `Data/` folder using the model `pombe_vpp_ribosome_unet_GE_KL.pt` stored in the `Model/` directory. This model is trained on 10 annotated macromolecules from the TS_0001 tomogram of *S Pombe* cells in the VPP dataset..You can download the tomogram from the given drive link in the `Data/` folder.
 
 **Output**:  
 The predicted particle coordinates along with their scores will be saved in:
